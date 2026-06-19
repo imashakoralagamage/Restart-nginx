@@ -1,5 +1,5 @@
 - name: Restart service using ServiceNow fields
-  hosts: ec2
+  hosts: all
   become: yes
   gather_facts: no
 

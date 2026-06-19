@@ -1,6 +1,5 @@
 - name: Restart service using ServiceNow fields
   hosts: all
-  become: yes
   gather_facts: no
 
   vars_files:

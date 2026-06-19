@@ -1,0 +1,144 @@
+- name: Restart service using ServiceNow fields
+  hosts: ec2
+  become: yes
+  gather_facts: no
+
+  vars_files:
+    - vars/snow_config.yml
+
+  tasks:
+
+    # ✅ STEP 1: Fetch incident
+    - name: Fetch incident from ServiceNow
+      uri:
+        url: "{{ snow_url }}?sysparm_query=u_server_ipISNOTEMPTY^u_service_nameISNOTEMPTY&sysparm_limit=1"
+        method: GET
+        user: "{{ snow_user }}"
+        password: "{{ snow_pass }}"
+        force_basic_auth: yes
+        headers:
+          Content-Type: application/json
+        return_content: yes
+      register: snow_response
+
+    # ✅ STEP 2: Convert JSON
+    - name: Convert JSON response
+      set_fact:
+        snow_data: "{{ snow_response.json if snow_response.json is defined else snow_response.content | from_json }}"
+
+    # ✅ STEP 3: Extract values from fields ✅
+    - name: Set variables from ServiceNow fields
+      set_fact:
+        server_ip: "{{ snow_data.result[0].u_server_ip }}"
+        service_name: "{{ snow_data.result[0].u_service_name }}"
+        incident_id: "{{ snow_data.result[0].sys_id }}"
+
+    # ✅ STEP 4: Debug
+    - name: Debug input
+      debug:
+        msg: "Service: {{ service_name }}, Server: {{ server_ip }}"
+
+    # ✅ STEP 5: Check service exists
+    - name: Check service exists
+      shell: systemctl status {{ service_name }} || true
+      register: svc_check
+
+    # ✅ STEP 6: If NOT installed → update SNOW + resolve
+    - name: Update SNOW - Not installed
+      uri:
+        url: "{{ snow_url }}/{{ incident_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_pass }}"
+        force_basic_auth: yes
+        headers:
+          Content-Type: application/json
+        body_format: json
+        body:
+          work_notes: |
+            ❌ Service {{ service_name }} is NOT installed on server {{ server_ip }}
+          state: "6"
+      when: "'Loaded: loaded' not in svc_check.stdout"
+
+    - name: Stop execution
+      fail:
+        msg: "Service not installed"
+      when: "'Loaded: loaded' not in svc_check.stdout"
+
+    # ✅ STEP 7: Check status
+    - name: Check service status
+      shell: systemctl is-active {{ service_name }} || true
+      register: svc_status
+
+    - name: Print status
+      debug:
+        msg: "Current status: {{ svc_status.stdout }}"
+
+    # ✅ STEP 8: If already running → update + resolve
+    - name: Update SNOW - Already running
+      uri:
+        url: "{{ snow_url }}/{{ incident_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_pass }}"
+        force_basic_auth: yes
+        headers:
+          Content-Type: application/json
+        body_format: json
+        body:
+          work_notes: |
+            ✅ Service Restart Automation
+
+            Service: {{ service_name }}
+            Server: {{ server_ip }}
+
+            Status: ALREADY RUNNING
+            No restart required.
+
+            ✅ Ticket Resolved
+          state: "6"
+      when: svc_status.stdout == "active"
+
+    # ✅ STEP 9: Restart if stopped
+    - name: Restart service
+      shell: systemctl restart {{ service_name }} || true
+      when: svc_status.stdout != "active"
+
+    # ✅ STEP 10: Final status check
+    - name: Check final status
+      shell: systemctl is-active {{ service_name }} || true
+      register: final_status
+      when: svc_status.stdout != "active"
+
+    # ✅ STEP 11: Update SNOW + Resolve
+    - name: Update SNOW - Restart result
+      uri:
+        url: "{{ snow_url }}/{{ incident_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_pass }}"
+        force_basic_auth: yes
+        headers:
+          Content-Type: application/json
+        body_format: json
+        body:
+          work_notes: |
+            🔧 Service Restart Automation Result
+
+            Service: {{ service_name }}
+            Server: {{ server_ip }}
+
+            Previous Status: {{ svc_status.stdout }}
+            Action: Restart Attempted
+
+            Final Status: {{ final_status.stdout }}
+
+            {% if final_status.stdout == "active" %}
+            ✅ Restart SUCCESSFUL
+            {% else %}
+            ❌ Restart FAILED
+            {% endif %}
+
+            ✅ Ticket Resolved
+          state: "6"
+      when: svc_status.stdout != "active"

@@ -25,8 +25,8 @@
       set_fact:
         snow_data: "{{ snow_response.json if snow_response.json is defined else snow_response.content | from_json }}"
 
-    # ✅ STEP 3: Extract values from fields ✅
-    - name: Set variables from ServiceNow fields
+    # ✅ STEP 3: Extract values
+    - name: Set variables
       set_fact:
         server_ip: "{{ snow_data.result[0].u_server_ip }}"
         service_name: "{{ snow_data.result[0].u_service_name }}"
@@ -39,10 +39,11 @@
 
     # ✅ STEP 5: Check service exists
     - name: Check service exists
-      shell: systemctl status {{ service_name }} || true
+      shell: systemctl list-unit-files | grep {{ service_name }}
       register: svc_check
+      failed_when: false
 
-    # ✅ STEP 6: If NOT installed → update SNOW + resolve
+    # ✅ STEP 6: If NOT installed
     - name: Update SNOW - Not installed
       uri:
         url: "{{ snow_url }}/{{ incident_id }}"
@@ -55,25 +56,31 @@
         body_format: json
         body:
           work_notes: |
-            ❌ Service {{ service_name }} is NOT installed on server {{ server_ip }}
+            ❌ Service NOT installed
+
+            Service: {{ service_name }}
+            Server: {{ server_ip }}
+
+            ❌ Automation stopped
           state: "6"
-      when: "'Loaded: loaded' not in svc_check.stdout"
+      when: svc_check.stdout == ""
 
     - name: Stop execution
       fail:
         msg: "Service not installed"
-      when: "'Loaded: loaded' not in svc_check.stdout"
+      when: svc_check.stdout == ""
 
-    # ✅ STEP 7: Check status
+    # ✅ STEP 7: Check current status
     - name: Check service status
-      shell: systemctl is-active {{ service_name }} || true
+      command: systemctl is-active {{ service_name }}
       register: svc_status
+      failed_when: false
 
-    - name: Print status
+    - name: Debug status
       debug:
         msg: "Current status: {{ svc_status.stdout }}"
 
-    # ✅ STEP 8: If already running → update + resolve
+    # ✅ STEP 8: If already running
     - name: Update SNOW - Already running
       uri:
         url: "{{ snow_url }}/{{ incident_id }}"
@@ -92,24 +99,25 @@
             Server: {{ server_ip }}
 
             Status: ALREADY RUNNING
-            No restart required.
+            No restart required
 
             ✅ Ticket Resolved
           state: "6"
       when: svc_status.stdout == "active"
 
-    # ✅ STEP 9: Restart if stopped
+    # ✅ STEP 9: Restart ONLY if stopped (FIXED ✅)
     - name: Restart service
-      shell: systemctl restart {{ service_name }} || true
-      when: svc_status.stdout != "active"
+      shell: sudo systemctl restart {{ service_name }}
+      when: svc_status.stdout == "inactive"
 
-    # ✅ STEP 10: Final status check
+    # ✅ STEP 10: Check final status
     - name: Check final status
-      shell: systemctl is-active {{ service_name }} || true
+      command: systemctl is-active {{ service_name }}
       register: final_status
-      when: svc_status.stdout != "active"
+      failed_when: false
+      when: svc_status.stdout == "inactive"
 
-    # ✅ STEP 11: Update SNOW + Resolve
+    # ✅ STEP 11: Update SNOW result
     - name: Update SNOW - Restart result
       uri:
         url: "{{ snow_url }}/{{ incident_id }}"
@@ -140,4 +148,4 @@
 
             ✅ Ticket Resolved
           state: "6"
-      when: svc_status.stdout != "active"
+      when: svc_status.stdout == "inactive"

@@ -1,5 +1,6 @@
 - name: Restart service using ServiceNow fields
   hosts: all
+  become: yes
   gather_facts: no
 
   vars_files:
@@ -7,7 +8,7 @@
 
   tasks:
 
-    # ✅ STEP 1: Fetch incident (API handling)
+    # STEP 1: Fetch incident
     - name: Fetch incident from ServiceNow
       uri:
         url: "{{ snow_url }}?sysparm_query=u_server_ipISNOTEMPTY^u_service_nameISNOTEMPTY&sysparm_limit=1"
@@ -21,37 +22,32 @@
       register: snow_response
       failed_when: snow_response.status != 200
 
-    # ✅ STEP 2: Convert JSON
-    - name: Convert JSON response
+    # STEP 2: Convert JSON
+    - name: Convert JSON
       set_fact:
         snow_data: "{{ snow_response.json if snow_response.json is defined else snow_response.content | from_json }}"
 
-    # ✅ STEP 3: Handle empty incidents
-    - name: Stop if no incident found
+    # STEP 3: No incident
+    - name: Stop if no incident
       fail:
         msg: "No incidents found"
       when: snow_data.result | length == 0
 
-    # ✅ STEP 4: Extract values
+    # STEP 4: Extract values
     - name: Set variables
       set_fact:
         server_ip: "{{ snow_data.result[0].u_server_ip }}"
         service_name: "{{ snow_data.result[0].u_service_name }}"
         incident_id: "{{ snow_data.result[0].sys_id }}"
 
-    # ✅ STEP 5: Debug
-    - name: Show input values
-      debug:
-        msg: "Service: {{ service_name }}, Server: {{ server_ip }}"
-
-    # ✅ STEP 6: Check service exists
+    # STEP 5: Check service exists
     - name: Check service exists
       shell: systemctl list-unit-files | grep {{ service_name }}
       register: svc_check
       failed_when: false
 
-    # ✅ STEP 7: Handle NOT installed
-    - name: Update SNOW - Service not installed
+    # NOT INSTALLED → MANUAL TEAM
+    - name: Service not installed → assign manual team
       uri:
         url: "{{ snow_url }}/{{ incident_id }}"
         method: PATCH
@@ -63,32 +59,27 @@
         body_format: json
         body:
           work_notes: |
-            ❌ Service NOT installed
-
+            Service NOT installed
             Service: {{ service_name }}
             Server: {{ server_ip }}
-
-            ❌ Automation stopped
-          state: "6"
+            Routed to manual team
+          assignment_group: "Manual Support Team"
+          state: "2"
       when: svc_check.stdout == ""
 
-    - name: Stop execution if not installed
+    - name: Stop execution
       fail:
         msg: "Service not installed"
       when: svc_check.stdout == ""
 
-    # ✅ STEP 8: Check current status
+    # STEP 6: Check current status
     - name: Check service status
       command: systemctl is-active {{ service_name }}
       register: svc_status
       failed_when: false
 
-    - name: Show current status
-      debug:
-        msg: "Current status: {{ svc_status.stdout }}"
-
-    # ✅ STEP 9: If already running
-    - name: Update SNOW - Already running
+    # ALREADY RUNNING
+    - name: Already running
       uri:
         url: "{{ snow_url }}/{{ incident_id }}"
         method: PATCH
@@ -100,38 +91,36 @@
         body_format: json
         body:
           work_notes: |
-            ✅ Service Restart Automation
-
-            Service: {{ service_name }}
-            Server: {{ server_ip }}
-
-            Status: ALREADY RUNNING
+            Service already running
             No restart required
-
-            ✅ Ticket Resolved
           state: "6"
       when: svc_status.stdout == "active"
 
-    # ✅ STEP 10: Restart ONLY if stopped
+    # RESTART IF NOT RUNNING
     - name: Restart service
-      shell: sudo systemctl restart {{ service_name }}
-      when: svc_status.stdout == "inactive"
+      shell: systemctl restart {{ service_name }}
+      when: svc_status.stdout != "active"
 
-    # ✅ STEP 11: WAIT 10 SECONDS
-    - name: Wait for service to stabilize
+    - name: Wait 10 seconds
       pause:
         seconds: 10
-      when: svc_status.stdout == "inactive"
+      when: svc_status.stdout != "active"
 
-    # ✅ STEP 12: Check final status
-    - name: Check final status
+    # RE-CHECK AFTER RESTART
+    - name: Check status after restart
       command: systemctl is-active {{ service_name }}
       register: final_status
       failed_when: false
-      when: svc_status.stdout == "inactive"
+      when: svc_status.stdout != "active"
 
-    # ✅ STEP 13: Update SNOW result
-    - name: Update SNOW - Restart result
+    # ✅ ✅ INTERNAL RELOAD (CORRECT METHOD)
+    - name: Reload MariaDB internally
+      shell: mysqladmin reload
+      when:
+        - (final_status.stdout | default(svc_status.stdout)) == "active"
+
+    # SUCCESS → RESOLVED
+    - name: Restart SUCCESS
       uri:
         url: "{{ snow_url }}/{{ incident_id }}"
         method: PATCH
@@ -143,22 +132,29 @@
         body_format: json
         body:
           work_notes: |
-            🔧 Service Restart Automation Result
-
-            Service: {{ service_name }}
-            Server: {{ server_ip }}
-
-            Previous Status: {{ svc_status.stdout }}
-            Action: Restart Attempted
-
-            Final Status: {{ final_status.stdout }}
-
-            {% if final_status.stdout == "active" %}
-            ✅ Restart SUCCESSFUL
-            {% else %}
-            ❌ Restart FAILED
-            {% endif %}
-
-            ✅ Ticket Resolved
+            Restart SUCCESSFUL
+            Final Status: {{ final_status.stdout | default(svc_status.stdout) }}
           state: "6"
-      when: svc_status.stdout == "inactive"
+      when:
+        - (final_status.stdout | default(svc_status.stdout)) == "active"
+
+    # FAILED → MANUAL TEAM
+    - name: Restart FAILED → assign manual team
+      uri:
+        url: "{{ snow_url }}/{{ incident_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_pass }}"
+        force_basic_auth: yes
+        headers:
+          Content-Type: application/json
+        body_format: json
+        body:
+          work_notes: |
+            Restart FAILED
+            Final Status: {{ final_status.stdout | default(svc_status.stdout) }}
+            Routed to manual team
+          assignment_group: "Manual Support Team"
+          state: "2"
+      when:
+        - (final_status.stdout | default(svc_status.stdout)) != "active"
